@@ -484,15 +484,23 @@ def main():
             risk_map_df = risk_map_df.rename(
                 columns={"행정동": "읍면동", "위도": "lat", "경도": "lon"}
             )
-            # 위험지수에 비례해서 원 크기 조정
-            risk_map_df["marker_radius"] = (risk_map_df["위험지수"] + 0.2) * 1000
+
+            # 🔹 원 크기 축소: 위험지수를 0~1 사이로 정규화해서 300~1300m 정도로만 표시
+            max_risk = float(risk_map_df["위험지수"].max())
+            min_radius = 300   # 최소 반경(미터)
+            max_radius = 1300  # 최대 반경(미터)
+
+            risk_map_df["marker_radius"] = (
+                min_radius
+                + (risk_map_df["위험지수"] / max_risk) * (max_radius - min_radius)
+            )
 
             layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=risk_map_df,
                 get_position="[lon, lat]",
                 get_radius="marker_radius",
-                get_fill_color="[255, 0, 0, 160]",  # 붉을수록 취약
+                get_fill_color="[255, 0, 0, 140]",  # 약간 투명한 빨간색
                 pickable=True,
             )
 
@@ -510,10 +518,17 @@ def main():
                     tooltip={"text": "읍·면·동: {읍면동}\n위험지수: {위험지수}"},
                 )
             )
+
+            # 🔹 두 번째 지오코딩 설명 추가
+            st.caption(
+                "※ 위험지수 지도는 노인복지시설·유해화학사업장 주소를 지오코딩하여 얻은 좌표(위도·경도)를 "
+                "읍·면·동별로 평균낸 위치에 표시한 것입니다."
+            )
+
         else:
             st.info(
                 "위험지수 지도를 표시하려면 읍·면·동별 위도/경도 정보가 필요합니다. "
-                "노인복지시설/사업장 데이터에 좌표(위도, 경도) 열을 추가해 주세요."
+                "노인복지시설 및 유해화학물질 사업장 도로명주소를 지오코딩해 '위도', '경도' 열을 추가해 주세요."
             )
 
         st.markdown("#### (4) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
