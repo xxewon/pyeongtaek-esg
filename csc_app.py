@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-
+import re # 행정동 파싱용 정규식
 # ------------------------------------------------------------
 # 기본 설정
 # ------------------------------------------------------------
@@ -126,14 +126,51 @@ def make_city_summary(df_air_scored: pd.DataFrame) -> pd.DataFrame:
     return city_summary
 
 
-# ★ 추가: 도로명주소에서 읍·면·동 추출하는 함수
+# ★ 수정: 도로명주소에서 행정 읍·면·동만 뽑는 함수 (건물동 필터링 포함)
 def extract_eupmyeondong(addr: str) -> str:
     if pd.isna(addr):
         return np.nan
-    tokens = str(addr).split()
-    for t in tokens:
-        if t.endswith(("읍", "면", "동")):
-            return t
+
+    text = str(addr)
+    # 공백, 쉼표, 괄호 기준으로 토큰 분리
+    tokens = re.split(r"[ ,()]", text)
+
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+
+        # 읍/면/동으로 끝나지 않으면 패스
+        if not tok.endswith(("읍", "면", "동")):
+            continue
+
+        # 행정구역이 될 수 없는 것들 제거
+        if tok in ("경기도", "평택시"):
+            continue
+
+        # ① 숫자 + 동 (1동, 103동, 101동 등) → 건물동
+        if re.fullmatch(r"\d+동", tok):
+            continue
+
+        # ② 영문/숫자 코드 + 동 (A동, B동, S001동 등) → 건물동
+        if re.fullmatch(r"[A-Za-z0-9]+동", tok):
+            continue
+
+        # ③ 제1동, 제2동 형태 → 건물동
+        if re.fullmatch(r"제\d+동", tok):
+            continue
+
+        # ④ 상가동 관련 (상가동, 상가2동, 참이슬아파트상가동 등) → 건물동
+        if "상가동" in tok or (tok.startswith("상가") and tok.endswith("동")):
+            continue
+
+        # ⑤ 한 글자 + 동 (가동, 나동 등) → 건물동으로 간주
+        if len(tok) == 2 and tok.endswith("동"):
+            continue
+
+        # 위 조건을 다 통과한 첫 번째 토큰을 행정읍면동으로 사용
+        return tok
+
     return np.nan
 
 
@@ -165,8 +202,16 @@ def main():
     region_row = df_region[df_region["시군구명"] == "평택시"].iloc[0]
 
     # ★ 추가: 평택시 내부 읍·면·동 단위 '위험지수' 계산
+    # ★ 노인복지시설: 도로명주소만 사용
     df_elderly["행정동"] = df_elderly["도로명주소"].apply(extract_eupmyeondong)
+
+    # ★ 유해화학물질 사업장: 도로명주소 → 안 나오면 지번주소로 보완
     df_chem["행정동"] = df_chem["소재지도로명주소"].apply(extract_eupmyeondong)
+    mask_na = df_chem["행정동"].isna()
+    if "소재지지번주소" in df_chem.columns:
+        df_chem.loc[mask_na, "행정동"] = df_chem.loc[mask_na, "소재지지번주소"].apply(
+            extract_eupmyeondong
+        )
 
     elderly_cnt = (
         df_elderly.groupby("행정동")
