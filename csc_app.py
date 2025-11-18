@@ -2,7 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import re # 행정동 파싱용 정규식
+import re  # 행정동 파싱용 정규식
+import pydeck as pdk
+
 # ------------------------------------------------------------
 # 기본 설정
 # ------------------------------------------------------------
@@ -11,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# 사용자 PC에 저장된 데이터 폴더
+# 사용자 PC/클라우드 기준 데이터 폴더
 BASE_DIR = (Path(__file__).parent / "data").resolve()
 
 # 대기오염 항목별 컬럼명 매핑
@@ -126,7 +128,7 @@ def make_city_summary(df_air_scored: pd.DataFrame) -> pd.DataFrame:
     return city_summary
 
 
-# ★ 수정: 도로명주소에서 행정 읍·면·동만 뽑는 함수 (건물동 필터링 포함)
+# 행정 읍·면·동만 뽑는 함수 (건물동 필터링 포함)
 def extract_eupmyeondong(addr: str) -> str:
     if pd.isna(addr):
         return np.nan
@@ -144,27 +146,27 @@ def extract_eupmyeondong(addr: str) -> str:
         if not tok.endswith(("읍", "면", "동")):
             continue
 
-        # 행정구역이 될 수 없는 것들 제거
+        # 광역/기초 지자체 이름 제외
         if tok in ("경기도", "평택시"):
             continue
 
-        # ① 숫자 + 동 (1동, 103동, 101동 등) → 건물동
+        # 숫자 + 동 (1동, 103동 등) → 건물동
         if re.fullmatch(r"\d+동", tok):
             continue
 
-        # ② 영문/숫자 코드 + 동 (A동, B동, S001동 등) → 건물동
+        # 영문/숫자 코드 + 동 (A동, B동, S001동 등) → 건물동
         if re.fullmatch(r"[A-Za-z0-9]+동", tok):
             continue
 
-        # ③ 제1동, 제2동 형태 → 건물동
+        # 제1동, 제2동 형태 → 건물동
         if re.fullmatch(r"제\d+동", tok):
             continue
 
-        # ④ 상가동 관련 (상가동, 상가2동, 참이슬아파트상가동 등) → 건물동
+        # 상가동 관련 → 건물동
         if "상가동" in tok or (tok.startswith("상가") and tok.endswith("동")):
             continue
 
-        # ⑤ 한 글자 + 동 (가동, 나동 등) → 건물동으로 간주
+        # 한 글자 + 동 (가동, 나동 등) → 건물동
         if len(tok) == 2 and tok.endswith("동"):
             continue
 
@@ -179,7 +181,11 @@ def extract_eupmyeondong(addr: str) -> str:
 # ------------------------------------------------------------
 def main():
     st.title("CSC 프로젝트 - 공공 ESG 관점 평택시 대기질 리스크 & 노인복지시설 분석")
-    st.caption("데이터 경로: C:/Users/yomy0/Documents/2025 하반기/CSC")
+    st.caption(
+        "데이터 출처: 공공데이터포털(data.go.kr) - "
+        "경기도 대기환경정보, 평택시 노인복지시설, 유해화학물질 취급사업장, "
+        "경기도 대기환경 진단평가시스템 지역정보"
+    )
 
     # 데이터 로드
     data = load_data()
@@ -201,11 +207,11 @@ def main():
     # 평택시 기초 정보 (대기환경 진단평가시스템)
     region_row = df_region[df_region["시군구명"] == "평택시"].iloc[0]
 
-    # ★ 추가: 평택시 내부 읍·면·동 단위 '위험지수' 계산
-    # ★ 노인복지시설: 도로명주소만 사용
+    # 평택시 내부 읍·면·동 단위 '위험지수' 계산
+    # 노인복지시설: 도로명주소 사용
     df_elderly["행정동"] = df_elderly["도로명주소"].apply(extract_eupmyeondong)
 
-    # ★ 유해화학물질 사업장: 도로명주소 → 안 나오면 지번주소로 보완
+    # 유해화학물질 사업장: 도로명주소 → 안 나오면 지번주소로 보완
     df_chem["행정동"] = df_chem["소재지도로명주소"].apply(extract_eupmyeondong)
     mask_na = df_chem["행정동"].isna()
     if "소재지지번주소" in df_chem.columns:
@@ -233,7 +239,37 @@ def main():
     )
     local_risk = local_risk.sort_values("위험지수", ascending=False)
 
+    # 읍·면·동별 평균 좌표 (노인복지시설 + 유해화학사업장 모두 활용)
+    coords_list = []
+    if {"위도", "경도"}.issubset(df_elderly.columns):
+        elder_coords = (
+            df_elderly.dropna(subset=["위도", "경도"])
+            .groupby("행정동")[["위도", "경도"]]
+            .mean()
+        )
+        coords_list.append(elder_coords)
+
+    if {"위도", "경도"}.issubset(df_chem.columns):
+        chem_coords = (
+            df_chem.dropna(subset=["위도", "경도"])
+            .groupby("행정동")[["위도", "경도"]]
+            .mean()
+        )
+        coords_list.append(chem_coords)
+
+    if coords_list:
+        coords_all = (
+            pd.concat(coords_list)
+            .groupby("행정동")[["위도", "경도"]]
+            .mean()
+        )
+        local_risk_map = local_risk.join(coords_all, how="left")
+    else:
+        local_risk_map = local_risk.copy()
+
+    # --------------------------------------------------------
     # 탭 구성
+    # --------------------------------------------------------
     tabs = st.tabs([
         "1. 데이터 개요",
         "2. 대기질 분석 (경기도 vs 평택시)",
@@ -371,14 +407,26 @@ def main():
         st.dataframe(df_chem_view.reset_index(drop=True), use_container_width=True)
 
     # --------------------------------------------------------
-    # 4. 평택시 노인복지시설 분포
+    # 4. 평택시 노인복지시설 분포 (지도 시각화 포함)
     # --------------------------------------------------------
     with tabs[3]:
         st.subheader("평택시 노인복지시설 현황")
 
         st.metric("노인복지시설 수", f"{len(df_elderly):,}")
 
-        st.markdown("#### (1) 시설종류별 개수")
+        st.markdown("#### (1) 노인복지시설 위치 지도")
+        if {"위도", "경도"}.issubset(df_elderly.columns):
+            elder_map = df_elderly.dropna(subset=["위도", "경도"]).rename(
+                columns={"위도": "lat", "경도": "lon"}
+            )
+            st.map(elder_map[["lat", "lon"]])
+        else:
+            st.info(
+                "노인복지시설 데이터에 위도/경도 열이 없습니다. "
+                "도로명주소를 지오코딩해 '위도', '경도' 열을 추가하면 지도 시각화가 가능합니다."
+            )
+
+        st.markdown("#### (2) 시설종류별 개수")
         facility_counts = (
             df_elderly["시설종류"]
             .value_counts()
@@ -387,7 +435,7 @@ def main():
         )
         st.bar_chart(facility_counts)
 
-        st.markdown("#### (2) 도로명주소 검색")
+        st.markdown("#### (3) 도로명주소 검색")
         addr_query = st.text_input("도로명주소에 포함될 키워드 (예: 고덕, 안중, 청북 등)")
         df_elderly_view = df_elderly.copy()
         if addr_query:
@@ -397,10 +445,8 @@ def main():
 
         st.dataframe(df_elderly_view.reset_index(drop=True), use_container_width=True)
 
-        st.caption("※ 지도 시각화를 위해서는 도로명주소를 위/경도로 변환(지오코딩)하는 추가 작업이 필요합니다.")
-
     # --------------------------------------------------------
-    # 5. 공공 ESG 관점 종합 진단  (★ 결론 + 시각화 강화)
+    # 5. 공공 ESG 관점 종합 진단  (지도 + 결론)
     # --------------------------------------------------------
     with tabs[4]:
         st.subheader("공공 ESG 관점에서 본 평택시 대기질 리스크 진단")
@@ -431,8 +477,46 @@ def main():
             use_container_width=True,
         )
 
-        # ★ 핵심 시각화: 평택시 읍·면·동별 '노인복지시설 vs 유해화학사업장' + 위험지수
-        st.markdown("#### (3) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
+        st.markdown("#### (3) 평택시 읍·면·동별 위험지수 지도")
+
+        if {"위도", "경도"}.issubset(local_risk_map.columns) and not local_risk_map["위도"].isna().all():
+            risk_map_df = local_risk_map.dropna(subset=["위도", "경도"]).reset_index()
+            risk_map_df = risk_map_df.rename(
+                columns={"행정동": "읍면동", "위도": "lat", "경도": "lon"}
+            )
+            # 위험지수에 비례해서 원 크기 조정
+            risk_map_df["marker_radius"] = (risk_map_df["위험지수"] + 0.2) * 1000
+
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=risk_map_df,
+                get_position="[lon, lat]",
+                get_radius="marker_radius",
+                get_fill_color="[255, 0, 0, 160]",  # 붉을수록 취약
+                pickable=True,
+            )
+
+            view_state = pdk.ViewState(
+                latitude=float(risk_map_df["lat"].mean()),
+                longitude=float(risk_map_df["lon"].mean()),
+                zoom=10.5,
+                pitch=0,
+            )
+
+            st.pydeck_chart(
+                pdk.Deck(
+                    layers=[layer],
+                    initial_view_state=view_state,
+                    tooltip={"text": "읍·면·동: {읍면동}\n위험지수: {위험지수}"},
+                )
+            )
+        else:
+            st.info(
+                "위험지수 지도를 표시하려면 읍·면·동별 위도/경도 정보가 필요합니다. "
+                "노인복지시설/사업장 데이터에 좌표(위도, 경도) 열을 추가해 주세요."
+            )
+
+        st.markdown("#### (4) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
 
         st.caption("위험지수 = 유해화학사업장 수 / (노인복지시설 수 + 1)")
 
@@ -449,7 +533,7 @@ def main():
         top_risky = local_risk.head(3).index.tolist()
         top_safe = local_risk.tail(3).index.tolist()
 
-        st.markdown("#### (4) 시각자료 기반 결론 요약")
+        st.markdown("#### (5) 시각자료 기반 결론 요약")
         st.markdown(
             f"""
             - **취약 지역(위험지수 상위 3)**: {", ".join(top_risky)}  
