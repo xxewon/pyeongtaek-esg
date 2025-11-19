@@ -369,27 +369,28 @@ def main():
     # 0단계: 기본 집계 (시설 수)
     local_risk = (
         pd.concat([elderly_cnt, chem_cnt], axis=1)
-        .reindex(emd_index)   # 23개 동 모두 포함
+        .reindex(emd_index)   # ← 23개 동으로 재정렬 + 없는 동은 0으로
         .fillna(0)
     )
 
     local_risk["노인복지시설_수"] = local_risk["노인복지시설_수"].astype(int)
     local_risk["유해화학사업장_수"] = local_risk["유해화학사업장_수"].astype(int)
 
-    # 1단계: CAI 파일에서 읍·면·동별 '최종 위험지수' 가져오기
-    #  - pyeongtaek_CAI_index.csv : [읍면동, CAI_Index, CAI_등급]
+    # 1단계: CAI 파일에서 '대기질 위험 지수' 가져오기
+    # pyeongtaek_CAI_index.csv : [읍면동, CAI_Index, CAI_등급]
     cai_index = df_cai.set_index("읍면동")
-
-    # 행정동 이름을 기준으로 CAI_Index를 붙임
     local_risk = local_risk.join(cai_index[["CAI_Index"]], how="left")
 
-    # 2단계: 종합 위험지수 = CAI_Index (파일 값 그대로 사용)
-    local_risk["위험지수"] = local_risk["CAI_Index"]
+    # CAI_Index를 '대기질위험지수'로 사용
+    local_risk = local_risk.rename(columns={"CAI_Index": "대기질위험지수"})
 
-    # CAI_Index 중간 컬럼은 안 보여도 되니 제거
-    local_risk = local_risk.drop(columns=["CAI_Index"])
+    # 2단계: 최종 위험 지수 = 0.3 * 유해화학사업장 수 + 0.7 * 대기질 위험 지수
+    local_risk["위험지수"] = (
+        0.3 * local_risk["유해화학사업장_수"]
+        + 0.7 * local_risk["대기질위험지수"]
+    )
 
-    # 최종 위험지수 기준 정렬
+    # 최종 위험 지수 기준 정렬
     local_risk = local_risk.sort_values("위험지수", ascending=False)
 
     # 읍·면·동별 평균 좌표 (노인복지시설 + 유해화학사업장 모두 활용)
@@ -719,21 +720,31 @@ def main():
         st.write(f"- 시군구명: **{region_row['시군구명']}**")
         st.write(f"- 지형 코드: **{region_row['지형']}**")
 
-        # (2) 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수 ----------
-        st.markdown("#### (2) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
+         # (2) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 대기질 위험 지수 · 위험 지수
+        st.markdown("#### (2) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 대기질 위험 지수 · 위험 지수")
         st.caption(
-            "위험지수 = pyeongtaek_CAI_index.csv에서 불러온 읍·면·동별 종합 위험지수(CAI_Index) 값 "
-            "(이미 유해화학사업장·대기질 정보를 반영하여 사전에 계산된 지수)"
+            "대기질 위험 지수 = pyeongtaek_CAI_index.csv의 CAI_Index 값, "
+            "위험 지수 = 0.3 × 유해화학사업장 수 + 0.7 × 대기질 위험 지수"
         )
 
-        # 요청대로 막대그래프는 표시하지 않고, 표만 보여줌
-        st.dataframe(
-            local_risk.reset_index().rename(columns={"행정동": "읍·면·동"}),
-            use_container_width=True,
+        risk_table = (
+            local_risk[["노인복지시설_수", "유해화학사업장_수", "대기질위험지수", "위험지수"]]
+            .reset_index()
+            .rename(
+                columns={
+                    "행정동": "읍·면·동",
+                    "노인복지시설_수": "노인복지시설 수",
+                    "유해화학사업장_수": "유해화학사업장 수",
+                    "대기질위험지수": "대기질 위험 지수",
+                    "위험지수": "위험 지수",
+                }
+            )
         )
 
-        # (3) 평택시 읍·면·동별 위험지수 지도 ------------------------------
-        st.markdown("#### (3) 평택시 읍·면·동별 위험지수 지도")
+        st.dataframe(risk_table, use_container_width=True)
+
+        # (3) 평택시 읍·면·동별 위험 지수 지도 ------------------------------
+        st.markdown("#### (3) 평택시 읍·면·동별 위험 지수 지도")
 
         if {"위도", "경도"}.issubset(local_risk_map.columns) and not local_risk_map["위도"].isna().all():
             risk_map_df = local_risk_map.dropna(subset=["위도", "경도"]).reset_index()
