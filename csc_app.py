@@ -89,6 +89,7 @@ def load_data():
     region = read_csv_safely(BASE_DIR / "경기도_대기환경_진단평가시스템_지역정보.csv")
     elderly = read_csv_safely(BASE_DIR / "경기도_평택시_노인복지시설_20250129_(1).csv")
     chem = read_csv_safely(BASE_DIR / "경기도_평택시_유해화학물질_취급사업장_현황_20250207.csv")
+    cai = read_csv_safely(BASE_DIR / "pyeongtaek_CAI_index.csv")
     elderly_pop = read_csv_safely(
         BASE_DIR / "202504_202510_주민등록인구기타현황(고령 인구현황)_월간.csv"
     )
@@ -99,6 +100,7 @@ def load_data():
         "elderly": elderly,
         "chem": chem,
         "elderly_pop": elderly_pop,
+        "cai": cai,
     }
 
 
@@ -311,6 +313,7 @@ def main():
     df_elderly_raw = data["elderly"]
     df_chem = data["chem"]
     df_pop = data["elderly_pop"]
+    df_cai = data["cai"]
 
     # 노인복지시설: 도로명주소 지오코딩 적용
     df_elderly = ensure_elderly_geocoded(df_elderly_raw)
@@ -354,19 +357,49 @@ def main():
         .rename("유해화학사업장_수")
     )
 
+    # 0단계: 기본 집계 (시설 수)
     local_risk = (
         pd.concat([elderly_cnt, chem_cnt], axis=1)
-        .reindex(emd_index)   # ← 23개 동으로 재정렬 + 없는 동은 0으로
+        .reindex(emd_index)   # 23개 동 모두 포함
         .fillna(0)
     )
 
+    # 정수형으로 정리
     local_risk["노인복지시설_수"] = local_risk["노인복지시설_수"].astype(int)
     local_risk["유해화학사업장_수"] = local_risk["유해화학사업장_수"].astype(int)
 
-    # 단순 위험지수: 유해화학사업장 수 / (노인복지시설 수 + 1)
-    local_risk["위험지수"] = local_risk["유해화학사업장_수"] / (
+    # 1단계: 유해화학 기반 위험지수
+    #    = 유해화학사업장 수 / (노인복지시설 수 + 1)
+    local_risk["시설위험지수"] = local_risk["유해화학사업장_수"] / (
         local_risk["노인복지시설_수"] + 1
     )
+
+    # 2단계: 대기질 위험지수(CAI Index) 붙이기
+    # pyeongtaek_CAI_index.csv : [읍면동, CAI_Index, CAI_등급]
+    cai_index = df_cai.set_index("읍면동")
+    local_risk = local_risk.join(cai_index[["CAI_Index"]], how="left")
+
+    # 3단계: 두 지표를 0~1 범위로 정규화
+    시설_max = local_risk["시설위험지수"].max()
+    cai_max = local_risk["CAI_Index"].max()
+
+    if 시설_max > 0:
+        local_risk["시설위험지수_norm"] = local_risk["시설위험지수"] / 시설_max
+    else:
+        local_risk["시설위험지수_norm"] = 0.0
+
+    if cai_max > 0:
+        local_risk["대기질위험지수_norm"] = local_risk["CAI_Index"] / cai_max
+    else:
+        local_risk["대기질위험지수_norm"] = 0.0
+
+    # 4단계: 최종 위험지수 = 0.3 * 시설위험 + 0.7 * 대기질위험
+    local_risk["위험지수"] = (
+        0.3 * local_risk["시설위험지수_norm"]
+        + 0.7 * local_risk["대기질위험지수_norm"]
+    )
+
+    # 최종 위험지수 기준 정렬
     local_risk = local_risk.sort_values("위험지수", ascending=False)
 
     # 읍·면·동별 평균 좌표 (노인복지시설 + 유해화학사업장 모두 활용)
@@ -755,7 +788,10 @@ def main():
             )
 
         st.markdown("#### (4) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
-        st.caption("위험지수 = 유해화학사업장 수 / (노인복지시설 수 + 1)")
+        st.caption(
+            "위험지수 = 0.3 × [유해화학사업장 수 / (노인복지시설 수 + 1)] "
+            "+ 0.7 × [대기질 위험지수(CAI Index)를 0~1로 정규화한 값]"
+        )
 
         # 행정동별 사업장 수 vs 노인복지시설 수 막대그래프
         st.bar_chart(local_risk[["유해화학사업장_수", "노인복지시설_수"]])
@@ -774,8 +810,8 @@ def main():
         st.markdown(
             f"""
             - **취약 지역(위험지수 상위 3)**: {", ".join(top_risky)}  
-              → 유해화학물질 취급사업장에 비해 노인복지시설이 상대적으로 부족한 지역으로,  
-                신규 노인복지시설 입지 검토가 필요한 **우선 관리 대상 권역**으로 해석할 수 있습니다.  
+              → 유해화학물질 취급사업장 밀집도와 대기질(CAI)이 상대적으로 나쁜 지역으로,  
+                동시에 노인복지시설이 부족할 가능성이 높은 **우선 관리 대상 권역**으로 해석할 수 있습니다.  
 
             - **상대적으로 양호한 지역(위험지수 하위 3)**: {", ".join(top_safe)}  
               → 노인복지시설이 상대적으로 충분하거나 유해화학사업장 밀집도가 낮은 지역으로,  
