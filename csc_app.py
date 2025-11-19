@@ -364,40 +364,21 @@ def main():
         .fillna(0)
     )
 
-    # 정수형으로 정리
     local_risk["노인복지시설_수"] = local_risk["노인복지시설_수"].astype(int)
     local_risk["유해화학사업장_수"] = local_risk["유해화학사업장_수"].astype(int)
 
-    # 1단계: 유해화학 기반 위험지수
-    #    = 유해화학사업장 수 / (노인복지시설 수 + 1)
-    local_risk["시설위험지수"] = local_risk["유해화학사업장_수"] / (
-        local_risk["노인복지시설_수"] + 1
-    )
-
-    # 2단계: 대기질 위험지수(CAI Index) 붙이기
-    # pyeongtaek_CAI_index.csv : [읍면동, CAI_Index, CAI_등급]
+    # 1단계: CAI 파일에서 읍·면·동별 '최종 위험지수' 가져오기
+    #  - pyeongtaek_CAI_index.csv : [읍면동, CAI_Index, CAI_등급]
     cai_index = df_cai.set_index("읍면동")
+
+    # 행정동 이름을 기준으로 CAI_Index를 붙임
     local_risk = local_risk.join(cai_index[["CAI_Index"]], how="left")
 
-    # 3단계: 두 지표를 0~1 범위로 정규화
-    시설_max = local_risk["시설위험지수"].max()
-    cai_max = local_risk["CAI_Index"].max()
+    # 2단계: 종합 위험지수 = CAI_Index (파일 값 그대로 사용)
+    local_risk["위험지수"] = local_risk["CAI_Index"]
 
-    if 시설_max > 0:
-        local_risk["시설위험지수_norm"] = local_risk["시설위험지수"] / 시설_max
-    else:
-        local_risk["시설위험지수_norm"] = 0.0
-
-    if cai_max > 0:
-        local_risk["대기질위험지수_norm"] = local_risk["CAI_Index"] / cai_max
-    else:
-        local_risk["대기질위험지수_norm"] = 0.0
-
-    # 4단계: 최종 위험지수 = 0.3 * 시설위험 + 0.7 * 대기질위험
-    local_risk["위험지수"] = (
-        0.3 * local_risk["시설위험지수_norm"]
-        + 0.7 * local_risk["대기질위험지수_norm"]
-    )
+    # CAI_Index 중간 컬럼은 안 보여도 되니 제거
+    local_risk = local_risk.drop(columns=["CAI_Index"])
 
     # 최종 위험지수 기준 정렬
     local_risk = local_risk.sort_values("위험지수", ascending=False)
@@ -789,8 +770,8 @@ def main():
 
         st.markdown("#### (4) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
         st.caption(
-            "위험지수 = 0.3 × [유해화학사업장 수 / (노인복지시설 수 + 1)] "
-            "+ 0.7 × [대기질 위험지수(CAI Index)를 0~1로 정규화한 값]"
+            "위험지수 = pyeongtaek_CAI_index.csv에서 불러온 읍·면·동별 종합 위험지수(CAI_Index) 값 "
+            "(이미 유해화학사업장·대기질 정보를 반영하여 사전에 계산된 지수)"
         )
 
         # 행정동별 사업장 수 vs 노인복지시설 수 막대그래프
