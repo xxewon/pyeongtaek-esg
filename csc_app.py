@@ -39,6 +39,15 @@ POLLUTANT_LABELS = {
 
 GRADE_TO_SCORE = {"좋음": 1, "보통": 2, "나쁨": 3, "매우나쁨": 4}
 
+# 평택시 법정 읍·면·동 25개만 사용
+LEGAL_EMD = [
+    "팽성읍", "안중읍", "포승읍", "청북읍",
+    "진위면", "서탄면", "고덕면", "오성면", "현덕면",
+    "중앙동",
+    "서정동", "송탄동", "지산동", "송북동", "신장1동",
+    "신장2동", "신평동", "원평동", "통복동", "비전1동",
+    "비전2동", "세교동", "용이동", "동삭동", "고덕동",
+]
 # ------------------------------------------------------------
 # 유틸 함수
 # ------------------------------------------------------------
@@ -133,53 +142,21 @@ def make_city_summary(df_air_scored: pd.DataFrame) -> pd.DataFrame:
     )
     return city_summary
 
-
-# 행정 읍·면·동만 뽑는 함수 (건물동 필터링 포함)
+# 행정 읍·면·동 추출 : 평택시 법정 25개만 허용
 def extract_eupmyeondong(addr: str) -> str:
     if pd.isna(addr):
         return np.nan
 
     text = str(addr)
-    # 공백, 쉼표, 괄호 기준으로 토큰 분리
-    tokens = re.split(r"[ ,()]", text)
 
-    for tok in tokens:
-        tok = tok.strip()
-        if not tok:
-            continue
+    # 주소 문자열 안에 25개 읍·면·동 이름이 들어있는지만 확인
+    for emd in LEGAL_EMD:
+        if emd in text:
+            return emd
 
-        # 읍/면/동으로 끝나지 않으면 패스
-        if not tok.endswith(("읍", "면", "동")):
-            continue
-
-        # 광역/기초 지자체 이름 제외
-        if tok in ("경기도", "평택시"):
-            continue
-
-        # 숫자 + 동 (1동, 103동 등) → 건물동
-        if re.fullmatch(r"\d+동", tok):
-            continue
-
-        # 영문/숫자 코드 + 동 (A동, B동, S001동 등) → 건물동
-        if re.fullmatch(r"[A-Za-z0-9]+동", tok):
-            continue
-
-        # 제1동, 제2동 형태 → 건물동
-        if re.fullmatch(r"제\d+동", tok):
-            continue
-
-        # 상가동 관련 → 건물동
-        if "상가동" in tok or (tok.startswith("상가") and tok.endswith("동")):
-            continue
-
-        # 한 글자 + 동 (가동, 나동 등) → 건물동
-        if len(tok) == 2 and tok.endswith("동"):
-            continue
-
-        # 위 조건을 다 통과한 첫 번째 토큰을 행정읍면동으로 사용
-        return tok
-
+    # 25개에 해당하지 않으면 제외
     return np.nan
+
 # ------------------------------------------------------------
 # 노인복지시설 도로명주소 지오코딩 (OpenStreetMap Nominatim 예시)
 # ------------------------------------------------------------
@@ -258,7 +235,7 @@ def main():
     st.caption(
         "데이터 출처: 공공데이터포털(data.go.kr) - "
         "경기도 대기환경정보, 평택시 노인복지시설, 유해화학물질 취급사업장, "
-        "경기도 대기환경 진f단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
+        "경기도 대기환경 진단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
     )
 
     # 데이터 로드
@@ -287,6 +264,8 @@ def main():
 
     # 평택시 내부 읍·면·동 단위 '위험지수' 계산
     # 노인복지시설: 도로명주소 사용
+    # 평택시 내부 읍·면·동 단위 '위험지수' 계산
+    # 노인복지시설: 도로명주소 사용
     df_elderly["행정동"] = df_elderly["도로명주소"].apply(extract_eupmyeondong)
 
     # 유해화학물질 사업장: 도로명주소 → 안 나오면 지번주소로 보완
@@ -296,6 +275,9 @@ def main():
         df_chem.loc[mask_na, "행정동"] = df_chem.loc[mask_na, "소재지지번주소"].apply(
             extract_eupmyeondong
         )
+
+    # 👉 평택시 법정 25개 읍·면·동 기준으로만 재정렬
+    emd_index = pd.Index(LEGAL_EMD, name="행정동")
 
     elderly_cnt = (
         df_elderly.groupby("행정동")
@@ -308,9 +290,15 @@ def main():
         .rename("유해화학사업장_수")
     )
 
-    local_risk = pd.concat([elderly_cnt, chem_cnt], axis=1).fillna(0)
+    local_risk = (
+        pd.concat([elderly_cnt, chem_cnt], axis=1)
+        .reindex(emd_index)   # ← 25개 읍·면·동으로 강제 정렬
+        .fillna(0)
+    )
+
     local_risk["노인복지시설_수"] = local_risk["노인복지시설_수"].astype(int)
     local_risk["유해화학사업장_수"] = local_risk["유해화학사업장_수"].astype(int)
+
     # 단순 위험지수: 유해화학사업장 수 / (노인복지시설 수 + 1)
     local_risk["위험지수"] = local_risk["유해화학사업장_수"] / (
         local_risk["노인복지시설_수"] + 1
