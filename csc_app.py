@@ -322,7 +322,16 @@ def main():
     df_air = add_air_quality_grades(df_air_raw, df_grade)
     city_summary = make_city_summary(df_air)
 
-    # 평택시/경기도 평균 위험 점수
+    # 👉 평택시 종합위험점수는 CAI 파일 값으로 대체
+    # pyeongtaek_CAI_index.csv : 읍·면·동별 CAI_Index (이미 종합 위험지수로 계산된 값)
+    if "CAI_Index" in df_cai.columns:
+        # 평택시 23개 읍·면·동 CAI_Index의 평균을 '평택시 종합위험점수'로 사용
+        pyeongtaek_cai_mean = df_cai["CAI_Index"].mean()
+        city_summary.loc[
+            city_summary["도시명"] == "평택시", "종합위험점수"
+        ] = pyeongtaek_cai_mean
+
+    # 평택시/경기도 평균 위험 점수 (위 코드에서 평택시 값 이미 교체됨)
     pyeongtaek_row = city_summary[city_summary["도시명"] == "평택시"].iloc[0]
     gyeonggi_mean_risk = city_summary["종합위험점수"].mean()
     pyeongtaek_risk = pyeongtaek_row["종합위험점수"]
@@ -773,9 +782,6 @@ def main():
             "위험지수 = pyeongtaek_CAI_index.csv에서 불러온 읍·면·동별 종합 위험지수(CAI_Index) 값 "
             "(이미 유해화학사업장·대기질 정보를 반영하여 사전에 계산된 지수)"
         )
-
-        # 행정동별 사업장 수 vs 노인복지시설 수 막대그래프
-        st.bar_chart(local_risk[["유해화학사업장_수", "노인복지시설_수"]])
 
         # 위험지수 테이블
         st.dataframe(
