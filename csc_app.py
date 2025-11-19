@@ -713,17 +713,26 @@ def main():
     with tabs[4]:
         st.subheader("평택시 읍·면·동별 환경 위험지수 분석")
 
+        # (1) 평택시 대기환경 진단평가시스템 정보 ---------------------------
         st.markdown("#### (1) 평택시 대기환경 진단평가시스템 정보")
         st.write(f"- 지역 구분: **{region_row['지역']}**")
         st.write(f"- 시군구명: **{region_row['시군구명']}**")
         st.write(f"- 지형 코드: **{region_row['지형']}**")
 
-        st.markdown("#### (2) 도시별 종합위험점수 비교 (상위 → 하위)")
+        # (2) 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수 ----------
+        st.markdown("#### (2) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
+        st.caption(
+            "위험지수 = pyeongtaek_CAI_index.csv에서 불러온 읍·면·동별 종합 위험지수(CAI_Index) 값 "
+            "(이미 유해화학사업장·대기질 정보를 반영하여 사전에 계산된 지수)"
+        )
+
+        # 요청대로 막대그래프는 표시하지 않고, 표만 보여줌
         st.dataframe(
-            city_summary.sort_values("종합위험점수", ascending=False),
+            local_risk.reset_index().rename(columns={"행정동": "읍·면·동"}),
             use_container_width=True,
         )
 
+        # (3) 평택시 읍·면·동별 위험지수 지도 ------------------------------
         st.markdown("#### (3) 평택시 읍·면·동별 위험지수 지도")
 
         if {"위도", "경도"}.issubset(local_risk_map.columns) and not local_risk_map["위도"].isna().all():
@@ -732,7 +741,6 @@ def main():
                 columns={"행정동": "읍면동", "위도": "lat", "경도": "lon"}
             )
 
-            # 원 크기: 위험지수 기준으로 300~1300m
             max_risk = float(risk_map_df["위험지수"].max())
             min_radius = 300
             max_radius = 1300
@@ -747,7 +755,7 @@ def main():
                 data=risk_map_df,
                 get_position="[lon, lat]",
                 get_radius="marker_radius",
-                get_fill_color="[255, 0, 0, 140]",  # 약간 투명한 빨간색
+                get_fill_color="[255, 0, 0, 140]",
                 pickable=True,
             )
 
@@ -770,30 +778,30 @@ def main():
                 "※ 위험지수 지도는 노인복지시설·유해화학사업장 주소를 지오코딩하여 얻은 좌표(위도·경도)를 "
                 "읍·면·동별로 평균낸 위치에 표시한 것입니다."
             )
-
         else:
             st.info(
                 "위험지수 지도를 표시하려면 읍·면·동별 위도/경도 정보가 필요합니다. "
                 "노인복지시설 및 유해화학물질 사업장 도로명주소를 지오코딩해 '위도', '경도' 열을 추가해 주세요."
             )
 
-        st.markdown("#### (4) 평택시 읍·면·동별 노인복지시설 · 유해화학사업장 · 위험지수")
-        st.caption(
-            "위험지수 = pyeongtaek_CAI_index.csv에서 불러온 읍·면·동별 종합 위험지수(CAI_Index) 값 "
-            "(이미 유해화학사업장·대기질 정보를 반영하여 사전에 계산된 지수)"
-        )
+        # (4) 시각자료 기반 결론 요약 ---------------------------------------
+        st.markdown("#### (4) 시각자료 기반 결론 요약")
 
-        # 위험지수 테이블
-        st.dataframe(
-            local_risk.reset_index().rename(columns={"행정동": "읍·면·동"}),
-            use_container_width=True,
-        )
-
-        # 상위/하위 지역 자동 요약
         top_risky = local_risk.sort_values("위험지수", ascending=False).head(3).index.tolist()
         top_safe = local_risk.sort_values("위험지수", ascending=True).head(3).index.tolist()
 
-        st.markdown("#### (5) 시각자료 기반 결론 요약")
+        st.markdown(
+            f"""
+            - **취약 지역(위험지수 상위 3)**: {", ".join(top_risky)}  
+              → 유해화학사업장·대기질이 상대적으로 열악한 지역으로,  
+                노인복지시설 확충과 환경 관리가 동시에 필요한 **우선 관리 대상 권역**으로 해석할 수 있습니다.  
+
+            - **상대적으로 양호한 지역(위험지수 하위 3)**: {", ".join(top_safe)}  
+              → 대기질이 상대적으로 양호하거나 유해화학사업장 밀집도가 낮은 지역으로,  
+                신규 공급보다는 **기존 시설의 질적 개선과 서비스 고도화** 중심의 전략이 적합합니다.  
+            """
+        )
+
         st.markdown(
             f"""
             - **취약 지역(위험지수 상위 3)**: {", ".join(top_risky)}  
