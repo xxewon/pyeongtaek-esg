@@ -59,12 +59,16 @@ def load_data():
     region = read_csv_safely(BASE_DIR / "경기도_대기환경_진단평가시스템_지역정보.csv")
     elderly = read_csv_safely(BASE_DIR / "경기도_평택시_노인복지시설_20250129_(1).csv")
     chem = read_csv_safely(BASE_DIR / "경기도_평택시_유해화학물질_취급사업장_현황_20250207.csv")
+    elderly_pop = read_csv_safely(
+        BASE_DIR / "202504_202510_주민등록인구기타현황(고령 인구현황)_월간.csv"
+    )
     return {
         "air": air,
         "grade": grade,
         "region": region,
         "elderly": elderly,
         "chem": chem,
+        "elderly_pop": elderly_pop,
     }
 
 
@@ -184,7 +188,7 @@ def main():
     st.caption(
         "데이터 출처: 공공데이터포털(data.go.kr) - "
         "경기도 대기환경정보, 평택시 노인복지시설, 유해화학물질 취급사업장, "
-        "경기도 대기환경 진단평가시스템 지역정보"
+        "경기도 대기환경 진단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
     )
 
     # 데이터 로드
@@ -194,6 +198,7 @@ def main():
     df_region = data["region"]
     df_elderly = data["elderly"]
     df_chem = data["chem"]
+    df_pop = data["elderly_pop"]
 
     # 전처리 (대기질 등급/위험점수 계산)
     df_air = add_air_quality_grades(df_air_raw, df_grade)
@@ -242,12 +247,12 @@ def main():
     # 읍·면·동별 평균 좌표 (노인복지시설 + 유해화학사업장 모두 활용)
     coords_list = []
     if {"위도", "경도"}.issubset(df_elderly.columns):
-        elder_coords = (
+        elder_coords_all = (
             df_elderly.dropna(subset=["위도", "경도"])
             .groupby("행정동")[["위도", "경도"]]
             .mean()
         )
-        coords_list.append(elder_coords)
+        coords_list.append(elder_coords_all)
 
     if {"위도", "경도"}.issubset(df_chem.columns):
         chem_coords = (
@@ -265,7 +270,17 @@ def main():
         )
         local_risk_map = local_risk.join(coords_all, how="left")
     else:
+        coords_all = pd.DataFrame()
         local_risk_map = local_risk.copy()
+
+    # 주민등록 인구(고령 인구) - 평택시 읍·면·동별 65세 이상 인구
+    df_pop_pt = df_pop[df_pop["행정구역"].str.contains("평택시", na=False)].copy()
+    df_pop_pt["읍면동"] = df_pop_pt["행정구역"].apply(extract_eupmyeondong)
+    df_pop_pt = df_pop_pt[~df_pop_pt["읍면동"].isna()].copy()
+
+    aged_total_cols = [c for c in df_pop_pt.columns if "65세이상전체" in c]
+    aged_total_cols = sorted(aged_total_cols)
+    default_month_idx = len(aged_total_cols) - 1 if aged_total_cols else 0
 
     # --------------------------------------------------------
     # 탭 구성
@@ -306,6 +321,9 @@ def main():
         st.markdown("#### (3) 유해화학물질 취급 사업장 데이터 예시")
         st.dataframe(df_chem.head(20), use_container_width=True)
 
+        st.markdown("#### (4) 주민등록 고령 인구 데이터 예시 (평택시)")
+        st.dataframe(df_pop_pt.head(20), use_container_width=True)
+
         st.caption("※ 종합위험점수: 각 월/측정소별 6개 오염물질 점수(1~4) 중 최댓값")
 
     # --------------------------------------------------------
@@ -339,7 +357,6 @@ def main():
             )
 
             value_col = POLLUTANT_COLS[sel_pollutant]
-            grade_col = f"{sel_pollutant}_등급"
 
         with right:
             st.markdown(
@@ -349,17 +366,6 @@ def main():
             plot_df = df_site.set_index("측정일")[[value_col]]
             plot_df.columns = ["농도"]
             st.line_chart(plot_df)
-
-            st.markdown("##### 같은 기간 등급 분포")
-            grade_counts = (
-                df_site[grade_col]
-                .value_counts()
-                .reindex(["좋음", "보통", "나쁨", "매우나쁨"])
-                .fillna(0)
-                .astype(int)
-            )
-            grade_df = grade_counts.rename_axis("등급").to_frame("월 수")
-            st.bar_chart(grade_df)
 
         st.markdown("----")
         st.markdown("#### 도시별 평균 농도 및 종합위험점수 (경기도 전체)")
@@ -394,16 +400,7 @@ def main():
         else:
             st.info("위도/경도 정보가 없어 지도 시각화는 생략합니다.")
 
-        st.markdown("#### (2) 업종별 사업장 수")
-        chem_counts = (
-            df_chem_view["업종명"]
-            .value_counts()
-            .rename_axis("업종명")
-            .to_frame("사업장 수")
-        )
-        st.bar_chart(chem_counts)
-
-        st.markdown("#### (3) 상세 테이블")
+        st.markdown("#### (2) 상세 테이블")
         st.dataframe(df_chem_view.reset_index(drop=True), use_container_width=True)
 
     # --------------------------------------------------------
@@ -426,7 +423,128 @@ def main():
                 "도로명주소를 지오코딩해 '위도', '경도' 열을 추가하면 지도 시각화가 가능합니다."
             )
 
-        st.markdown("#### (2) 시설종류별 개수")
+        # ----- (새로 추가) 읍·면·동별 노인인구 vs 노인복지시설 비교 지도 -----
+        st.markdown("#### (2) 읍·면·동별 65세 이상 인구 대비 노인복지시설 충족도")
+        if aged_total_cols:
+            # 셀렉트박스용 라벨 (예: 2025년10월)
+            month_label_map = {
+                col: col.replace("_65세이상전체", "")
+                for col in aged_total_cols
+            }
+            month_labels = list(month_label_map.values())
+            sel_label = st.selectbox(
+                "기준 월 선택 (65세 이상 인구)",
+                month_labels,
+                index=default_month_idx,
+            )
+            inv_month_label_map = {v: k for k, v in month_label_map.items()}
+            sel_col = inv_month_label_map[sel_label]
+
+            # 월별 65세 이상 인구 (문자열 → 정수)
+            pop_month = (
+                df_pop_pt[["읍면동", sel_col]]
+                .assign(
+                    고령인구_수=lambda d: d[sel_col]
+                    .replace(",", "", regex=True)
+                    .astype("int64")
+                )[["읍면동", "고령인구_수"]]
+                .groupby("읍면동")["고령인구_수"]
+                .sum()
+                .rename_axis("행정동")
+            )
+
+            # 읍·면·동별 노인복지시설 수
+            elderly_cnt_for_cov = (
+                df_elderly.groupby("행정동")
+                .size()
+                .rename("노인복지시설_수")
+            )
+
+            coverage = pd.concat([elderly_cnt_for_cov, pop_month], axis=1)
+            coverage["노인복지시설_수"] = coverage["노인복지시설_수"].fillna(0).astype(int)
+            coverage["고령인구_수"] = coverage["고령인구_수"].fillna(0).astype(int)
+
+            # 65세 이상 1천 명당 노인복지시설 수 (값이 클수록 인프라 양호)
+            coverage["시설_천명당"] = np.where(
+                coverage["고령인구_수"] > 0,
+                coverage["노인복지시설_수"] / (coverage["고령인구_수"] / 1000.0),
+                np.nan,
+            )
+
+            # 지도용 좌표 (노인복지시설 위치 평균)
+            if {"위도", "경도"}.issubset(df_elderly.columns):
+                coords_cov = (
+                    df_elderly.dropna(subset=["위도", "경도"])
+                    .groupby("행정동")[["위도", "경도"]]
+                    .mean()
+                    .rename(columns={"위도": "lat", "경도": "lon"})
+                )
+                coverage_map = (
+                    coverage.join(coords_cov, how="left")
+                    .reset_index()
+                    .rename(columns={"행정동": "읍면동"})
+                )
+                coverage_map = coverage_map.dropna(
+                    subset=["lat", "lon", "시설_천명당"]
+                )
+                if not coverage_map.empty:
+                    max_cov = float(coverage_map["시설_천명당"].max())
+                    min_radius, max_radius = 300, 1400
+                    coverage_map["marker_radius"] = (
+                        min_radius
+                        + (coverage_map["시설_천명당"] / max_cov) * (max_radius - min_radius)
+                    )
+
+                    layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        data=coverage_map,
+                        get_position="[lon, lat]",
+                        get_radius="marker_radius",
+                        get_fill_color="[0, 153, 255, 150]",  # 파란 계열 원, 반투명
+                        pickable=True,
+                    )
+                    view_state = pdk.ViewState(
+                        latitude=float(coverage_map["lat"].mean()),
+                        longitude=float(coverage_map["lon"].mean()),
+                        zoom=10.5,
+                        pitch=0,
+                    )
+                    st.pydeck_chart(
+                        pdk.Deck(
+                            layers=[layer],
+                            initial_view_state=view_state,
+                            tooltip={
+                                "text": "읍·면·동: {읍면동}\\n"
+                                        "65세 이상 인구: {고령인구_수}명\\n"
+                                        "노인복지시설 수: {노인복지시설_수}개\\n"
+                                        "시설 수 (천 명당): {시설_천명당:.2f}"
+                            },
+                        )
+                    )
+
+                    st.caption(
+                        f"※ 선택한 기준 월: **{sel_label}**, "
+                        "65세 이상 1천 명당 시설 수가 클수록 노인복지 인프라가 상대적으로 잘 갖춰진 지역입니다."
+                    )
+
+                    st.markdown("#### (3) 읍·면·동별 지표 비교 표")
+                    st.dataframe(
+                        coverage_map[
+                            ["읍면동", "고령인구_수", "노인복지시설_수", "시설_천명당"]
+                        ].sort_values("시설_천명당", ascending=False),
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("노인복지시설 좌표 정보가 없어 충족도 지도를 표시할 수 없습니다.")
+            else:
+                st.info(
+                    "노인복지시설 데이터에 위도/경도 정보가 없어 "
+                    "노인인구 대비 시설 충족도 지도를 표시할 수 없습니다."
+                )
+        else:
+            st.info("주민등록 인구 통계 데이터에서 '65세이상전체' 컬럼을 찾을 수 없습니다.")
+
+        st.markdown("#### (4) 시설종류별 개수")
         facility_counts = (
             df_elderly["시설종류"]
             .value_counts()
@@ -435,7 +553,7 @@ def main():
         )
         st.bar_chart(facility_counts)
 
-        st.markdown("#### (3) 도로명주소 검색")
+        st.markdown("#### (5) 도로명주소 검색")
         addr_query = st.text_input("도로명주소에 포함될 키워드 (예: 고덕, 안중, 청북 등)")
         df_elderly_view = df_elderly.copy()
         if addr_query:
@@ -515,7 +633,7 @@ def main():
                 pdk.Deck(
                     layers=[layer],
                     initial_view_state=view_state,
-                    tooltip={"text": "읍·면·동: {읍면동}\n위험지수: {위험지수}"},
+                    tooltip={"text": "읍·면·동: {읍면동}\\n위험지수: {위험지수}"},
                 )
             )
 
