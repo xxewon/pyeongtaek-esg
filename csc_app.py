@@ -271,26 +271,45 @@ def geocode_elderly_addresses(addresses: tuple) -> pd.DataFrame:
 
 def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
     """
-    노인복지시설 데이터에 위도/경도 컬럼이 없거나 전부 결측이면
-    도로명주소 기준으로 지오코딩을 수행해 lat/lon을 붙여줌.
+    노인복지시설 데이터에 대해 도로명주소 기준으로 지오코딩을 수행하여
+    위도/경도 컬럼을 채워준다.
+    - 기존에 위도/경도가 일부 존재하면 그대로 두고, 부족한 행만 채운다.
     """
     df = df_elderly.copy()
 
-    # 이미 위도/경도 있고 어느 정도 채워져 있으면 그대로 사용
-    if {"위도", "경도"}.issubset(df.columns) and not df[["위도", "경도"]].isna().all().all():
+    # 위도/경도 컬럼이 없으면 생성
+    if "위도" not in df.columns:
+        df["위도"] = np.nan
+    if "경도" not in df.columns:
+        df["경도"] = np.nan
+
+    # 지오코딩이 필요한 행(위도 또는 경도가 비어 있는 경우)
+    need_geo_mask = df["위도"].isna() | df["경도"].isna()
+    addrs_to_geo = (
+        df.loc[need_geo_mask, "도로명주소"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    if not addrs_to_geo:
+        # 채울 주소가 없으면 그대로 반환
         return df
 
-    # 도로명주소에서 유니크 주소만 추출
-    addr_series = df["도로명주소"].dropna().unique().tolist()
-    if len(addr_series) == 0:
-        return df
-
-    addr_tuple = tuple(sorted(addr_series))
+    addr_tuple = tuple(sorted(addrs_to_geo))
 
     with st.spinner("노인복지시설 도로명주소를 지오코딩하는 중입니다. (한 번만 수행됩니다)"):
         geo_df = geocode_elderly_addresses(addr_tuple)
 
-    df = df.merge(geo_df, on="도로명주소", how="left")
+    # 기존 df와 지오코딩 결과를 병합
+    df = df.merge(geo_df, on="도로명주소", how="left", suffixes=("", "_geo"))
+
+    # 기존 위도/경도가 비어 있는 경우에만 _geo 값으로 채우기
+    for col in ["위도", "경도"]:
+        geo_col = f"{col}_geo"
+        if geo_col in df.columns:
+            df[col] = df[col].where(~df[col].isna(), df[geo_col])
+            df.drop(columns=[geo_col], inplace=True)
+
     return df
 
 
@@ -684,9 +703,6 @@ def main():
             # ✅ 지오코딩 + 충족도 결과 데이터 테이블 항상 보여주기
             st.markdown("#### (3) 읍·면·동별 노인복지시설 충족도 데이터")
             cols_to_show = ["읍면동", "고령인구_수", "노인복지시설_수", "시설_천명당"]
-            # 좌표까지 같이 보고 싶으면 lat/lon도 포함
-            if "lat" in coverage_with_coords.columns and "lon" in coverage_with_coords.columns:
-                cols_to_show += ["lat", "lon"]
 
             st.dataframe(
                 coverage_with_coords[cols_to_show].sort_values(
@@ -694,6 +710,7 @@ def main():
                 ),
                 use_container_width=True,
             )
+
         else:
             st.info("주민등록 인구 통계 데이터에서 '65세이상전체' 컬럼을 찾을 수 없습니다.")
 
@@ -803,13 +820,15 @@ def main():
 
         st.markdown(
             f"""
-            - **취약 지역(위험지수 상위 3)**: {", ".join(top_risky)}  
-              → 유해화학사업장·대기질이 상대적으로 열악한 지역으로,  
-                노인복지시설 확충과 환경 관리가 동시에 필요한 **우선 관리 대상 권역**으로 해석할 수 있습니다.  
+            - **위험 지수 상위 3개 읍·면·동**: {", ".join(top_risky)}  
+              → 유해화학물질 취급 사업장 수(가중치 0.3)와 대기질 위험 지수(가중치 0.7)가 모두 높은 **복합 환경 취약 지역**입니다.  
+                · 신규 노인복지시설 입지 선정 시에는 이들 지역은 지양하고,  
+                  기존 시설에 대해서는 공기질 개선, 유해물질 관리, 실내 환기·필터링 강화 등 **환경 리스크 관리 중심 전략**이 필요합니다.  
 
-            - **상대적으로 양호한 지역(위험지수 하위 3)**: {", ".join(top_safe)}  
-              → 대기질이 상대적으로 양호하거나 유해화학사업장 밀집도가 낮은 지역으로,  
-                신규 공급보다는 **기존 시설의 질적 개선과 서비스 고도화** 중심의 전략이 적합합니다.  
+            - **위험 지수 하위 3개 읍·면·동**: {", ".join(top_safe)}  
+              → 대기질이 상대적으로 양호하거나 유해화학사업장 밀집도가 낮은 **상대적 안전 지역**으로 해석됩니다.  
+                · 추가 노인복지시설 공급이 필요할 경우, 우선적으로 검토할 수 있는 후보지이며,  
+                  동시에 **생활 편의·접근성·서비스 품질** 측면에서의 세밀한 개선이 적합한 지역입니다.
             """
         )
 
