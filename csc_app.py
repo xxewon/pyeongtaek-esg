@@ -5,6 +5,8 @@ from pathlib import Path
 import re  # 행정동 파싱용 정규식
 import pydeck as pdk
 
+import requests  # 지오코딩용
+import time  #지오코딩 호출 간 간격 조절용
 # ------------------------------------------------------------
 # 기본 설정
 # ------------------------------------------------------------
@@ -178,6 +180,74 @@ def extract_eupmyeondong(addr: str) -> str:
         return tok
 
     return np.nan
+# ------------------------------------------------------------
+# 노인복지시설 도로명주소 지오코딩 (OpenStreetMap Nominatim 예시)
+# ------------------------------------------------------------
+def _geocode_single(addr: str):
+    """단일 주소를 위도/경도로 변환 (실패하면 (None, None) 반환)."""
+    if not addr or pd.isna(addr):
+        return None, None
+
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": addr,
+        "format": "json",
+        "limit": 1,
+    }
+    headers = {
+        # OSM 정책상 user-agent 꼭 필요. 이메일은 편한 걸로 바꿔도 됨.
+        "User-Agent": "pyeongtaek-esg-app (contact: your_email@example.com)"
+    }
+
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return None, None
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    except Exception:
+        return None, None
+
+
+@st.cache_data
+def geocode_elderly_addresses(addresses: tuple) -> pd.DataFrame:
+    """
+    노인복지시설 도로명주소 목록을 받아 지오코딩 결과(lat, lon)를 반환.
+    같은 주소 세트에 대해서는 캐시되어 다시 호출되지 않음.
+    """
+    rows = []
+    for addr in addresses:
+        lat, lon = _geocode_single(addr)
+        rows.append({"도로명주소": addr, "위도": lat, "경도": lon})
+        # 너무 공격적으로 호출하면 막힐 수 있으니 약간의 간격
+        time.sleep(0.3)
+    return pd.DataFrame(rows)
+
+
+def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
+    """
+    노인복지시설 데이터에 위도/경도 컬럼이 없거나 전부 결측이면
+    도로명주소 기준으로 지오코딩을 수행해 lat/lon을 붙여줌.
+    """
+    df = df_elderly.copy()
+
+    # 이미 위도/경도 있고 어느 정도 채워져 있으면 그대로 사용
+    if {"위도", "경도"}.issubset(df.columns) and not df[["위도", "경도"]].isna().all().all():
+        return df
+
+    # 도로명주소에서 유니크 주소만 추출
+    addr_series = df["도로명주소"].dropna().unique().tolist()
+    if len(addr_series) == 0:
+        return df
+
+    addr_tuple = tuple(sorted(addr_series))
+
+    with st.spinner("노인복지시설 도로명주소를 지오코딩하는 중입니다. (한 번만 수행됩니다)"):
+        geo_df = geocode_elderly_addresses(addr_tuple)
+
+    df = df.merge(geo_df, on="도로명주소", how="left")
+    return df
 
 
 # ------------------------------------------------------------
@@ -188,7 +258,7 @@ def main():
     st.caption(
         "데이터 출처: 공공데이터포털(data.go.kr) - "
         "경기도 대기환경정보, 평택시 노인복지시설, 유해화학물질 취급사업장, "
-        "경기도 대기환경 진단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
+        "경기도 대기환경 진f단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
     )
 
     # 데이터 로드
@@ -196,9 +266,12 @@ def main():
     df_air_raw = data["air"]
     df_grade = data["grade"]
     df_region = data["region"]
-    df_elderly = data["elderly"]
+    df_elderly_raw = data["elderly"]
     df_chem = data["chem"]
     df_pop = data["elderly_pop"]
+
+    # 노인복지시설: 도로명주소 지오코딩 적용
+    df_elderly = ensure_elderly_geocoded(df_elderly_raw)
 
     # 전처리 (대기질 등급/위험점수 계산)
     df_air = add_air_quality_grades(df_air_raw, df_grade)
@@ -402,35 +475,34 @@ def main():
 
         st.markdown("#### (2) 상세 테이블")
         st.dataframe(df_chem_view.reset_index(drop=True), use_container_width=True)
-
     # --------------------------------------------------------
-    # 4. 평택시 노인복지시설 분포 (지도 시각화 포함)
+    # 4. 평택시 노인복지시설 분포 (지도 시각화 + 충족도 데이터)
     # --------------------------------------------------------
     with tabs[3]:
         st.subheader("평택시 노인복지시설 현황")
 
         st.metric("노인복지시설 수", f"{len(df_elderly):,}")
 
+        # (1) 노인복지시설 위치 지도 ----------------------------------------
         st.markdown("#### (1) 노인복지시설 위치 지도")
-        if {"위도", "경도"}.issubset(df_elderly.columns):
-            elder_map = df_elderly.dropna(subset=["위도", "경도"]).rename(
-                columns={"위도": "lat", "경도": "lon"}
+        if {"위도", "경도"}.issubset(df_elderly.columns) and not df_elderly[["위도", "경도"]].isna().all().all():
+            elder_map = (
+                df_elderly
+                .dropna(subset=["위도", "경도"])
+                .rename(columns={"위도": "lat", "경도": "lon"})
             )
             st.map(elder_map[["lat", "lon"]])
         else:
             st.info(
-                "노인복지시설 데이터에 위도/경도 열이 없습니다. "
-                "도로명주소를 지오코딩해 '위도', '경도' 열을 추가하면 지도 시각화가 가능합니다."
+                "노인복지시설 도로명주소 지오코딩 결과가 없어서 지도를 표시하지 못했습니다."
             )
 
-        # ----- (새로 추가) 읍·면·동별 노인인구 vs 노인복지시설 비교 지도 -----
+        # (2) 읍·면·동별 65세 이상 인구 대비 노인복지시설 충족도 -------------
         st.markdown("#### (2) 읍·면·동별 65세 이상 인구 대비 노인복지시설 충족도")
+
         if aged_total_cols:
-            # 셀렉트박스용 라벨 (예: 2025년10월)
-            month_label_map = {
-                col: col.replace("_65세이상전체", "")
-                for col in aged_total_cols
-            }
+            # 기준 월 선택
+            month_label_map = {col: col.replace("_65세이상전체", "") for col in aged_total_cols}
             month_labels = list(month_label_map.values())
             sel_label = st.selectbox(
                 "기준 월 선택 (65세 이상 인구)",
@@ -440,7 +512,7 @@ def main():
             inv_month_label_map = {v: k for k, v in month_label_map.items()}
             sel_col = inv_month_label_map[sel_label]
 
-            # 월별 65세 이상 인구 (문자열 → 정수)
+            # 평택시 읍·면·동별 65세 이상 인구
             pop_month = (
                 df_pop_pt[["읍면동", sel_col]]
                 .assign(
@@ -453,7 +525,7 @@ def main():
                 .rename_axis("행정동")
             )
 
-            # 읍·면·동별 노인복지시설 수
+            # 노인복지시설 수 (행정동 기준)
             elderly_cnt_for_cov = (
                 df_elderly.groupby("행정동")
                 .size()
@@ -464,48 +536,55 @@ def main():
             coverage["노인복지시설_수"] = coverage["노인복지시설_수"].fillna(0).astype(int)
             coverage["고령인구_수"] = coverage["고령인구_수"].fillna(0).astype(int)
 
-            # 65세 이상 1천 명당 노인복지시설 수 (값이 클수록 인프라 양호)
+            # 65세 이상 1천 명당 시설 수
             coverage["시설_천명당"] = np.where(
                 coverage["고령인구_수"] > 0,
                 coverage["노인복지시설_수"] / (coverage["고령인구_수"] / 1000.0),
                 np.nan,
             )
 
-            # 지도용 좌표 (노인복지시설 위치 평균)
+            # 지도용 좌표 (행정동별 평균 위도/경도)
             if {"위도", "경도"}.issubset(df_elderly.columns):
                 coords_cov = (
-                    df_elderly.dropna(subset=["위도", "경도"])
+                    df_elderly
+                    .dropna(subset=["위도", "경도"])
                     .groupby("행정동")[["위도", "경도"]]
                     .mean()
                     .rename(columns={"위도": "lat", "경도": "lon"})
                 )
-                coverage_map = (
+                coverage_with_coords = (
                     coverage.join(coords_cov, how="left")
                     .reset_index()
                     .rename(columns={"행정동": "읍면동"})
                 )
-                coverage_map = coverage_map.dropna(
-                    subset=["lat", "lon", "시설_천명당"]
+            else:
+                coverage_with_coords = (
+                    coverage.reset_index()
+                    .rename(columns={"행정동": "읍면동"})
                 )
-                if not coverage_map.empty:
-                    max_cov = float(coverage_map["시설_천명당"].max())
+
+            # 지도 표시 (좌표와 충족도 모두 있는 행만 사용)
+            if {"lat", "lon"}.issubset(coverage_with_coords.columns):
+                cov_for_map = coverage_with_coords.dropna(subset=["lat", "lon", "시설_천명당"])
+                if not cov_for_map.empty:
+                    max_cov = float(cov_for_map["시설_천명당"].max())
                     min_radius, max_radius = 300, 1400
-                    coverage_map["marker_radius"] = (
+                    cov_for_map["marker_radius"] = (
                         min_radius
-                        + (coverage_map["시설_천명당"] / max_cov) * (max_radius - min_radius)
+                        + (cov_for_map["시설_천명당"] / max_cov) * (max_radius - min_radius)
                     )
 
                     layer = pdk.Layer(
                         "ScatterplotLayer",
-                        data=coverage_map,
+                        data=cov_for_map,
                         get_position="[lon, lat]",
                         get_radius="marker_radius",
-                        get_fill_color="[0, 153, 255, 150]",  # 파란 계열 원, 반투명
+                        get_fill_color="[0, 153, 255, 150]",
                         pickable=True,
                     )
                     view_state = pdk.ViewState(
-                        latitude=float(coverage_map["lat"].mean()),
-                        longitude=float(coverage_map["lon"].mean()),
+                        latitude=float(cov_for_map["lat"].mean()),
+                        longitude=float(cov_for_map["lon"].mean()),
                         zoom=10.5,
                         pitch=0,
                     )
@@ -521,39 +600,29 @@ def main():
                             },
                         )
                     )
-
                     st.caption(
-                        f"※ 선택한 기준 월: **{sel_label}**, "
-                        "65세 이상 1천 명당 시설 수가 클수록 노인복지 인프라가 상대적으로 잘 갖춰진 지역입니다."
+                        f"※ 기준 월: **{sel_label}**, 65세 이상 1천 명당 시설 수가 클수록 "
+                        "노인복지 인프라가 상대적으로 잘 갖춰진 지역입니다."
                     )
 
-                    st.markdown("#### (3) 읍·면·동별 지표 비교 표")
-                    st.dataframe(
-                        coverage_map[
-                            ["읍면동", "고령인구_수", "노인복지시설_수", "시설_천명당"]
-                        ].sort_values("시설_천명당", ascending=False),
-                        use_container_width=True,
-                    )
-                else:
-                    st.info("노인복지시설 좌표 정보가 없어 충족도 지도를 표시할 수 없습니다.")
-            else:
-                st.info(
-                    "노인복지시설 데이터에 위도/경도 정보가 없어 "
-                    "노인인구 대비 시설 충족도 지도를 표시할 수 없습니다."
-                )
+            # ✅ 지오코딩 + 충족도 결과 데이터 테이블 항상 보여주기
+            st.markdown("#### (3) 읍·면·동별 노인복지시설 충족도 데이터")
+            cols_to_show = ["읍면동", "고령인구_수", "노인복지시설_수", "시설_천명당"]
+            # 좌표까지 같이 보고 싶으면 lat/lon도 포함
+            if "lat" in coverage_with_coords.columns and "lon" in coverage_with_coords.columns:
+                cols_to_show += ["lat", "lon"]
+
+            st.dataframe(
+                coverage_with_coords[cols_to_show].sort_values(
+                    "시설_천명당", ascending=False
+                ),
+                use_container_width=True,
+            )
         else:
             st.info("주민등록 인구 통계 데이터에서 '65세이상전체' 컬럼을 찾을 수 없습니다.")
 
-        st.markdown("#### (4) 시설종류별 개수")
-        facility_counts = (
-            df_elderly["시설종류"]
-            .value_counts()
-            .rename_axis("시설종류")
-            .to_frame("개수")
-        )
-        st.bar_chart(facility_counts)
-
-        st.markdown("#### (5) 도로명주소 검색")
+        # (4) 도로명주소 검색 --------------------------------------------
+        st.markdown("#### (4) 도로명주소 검색")
         addr_query = st.text_input("도로명주소에 포함될 키워드 (예: 고덕, 안중, 청북 등)")
         df_elderly_view = df_elderly.copy()
         if addr_query:
