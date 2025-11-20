@@ -647,6 +647,9 @@ def main():
                 np.nan,
             )
 
+            # 결론 지도에서 쓸 건 시설_천명당만 필요
+            coverage_final = coverage[["시설_천명당"]]
+
             # 지도용 좌표 (행정동별 평균 위도/경도)
             if {"위도", "경도"}.issubset(df_elderly.columns):
                 coords_cov = (
@@ -852,11 +855,17 @@ def main():
                 신규 공급보다는 **기존 시설의 질적 개선과 서비스 고도화** 중심의 전략이 적합합니다.  
             """
         )
-    # --------------------------------------------------------
+        # --------------------------------------------------------
     # 6. 공공 ESG 관점 종합 진단  (지도 + 결론)
     # --------------------------------------------------------
     with tabs[5]:
         st.subheader("공공 ESG 관점에서 본 평택시 노인복지시설 입지 전략")
+
+        # 👉 읍·면·동별 환경 위험(local_risk_map) + 노인복지시설 충족도(coverage_final) 결합
+        #   - index: 행정동
+        #   - 필요한 컬럼: 시설_천명당, 위험지수, 위도, 경도
+        emd_final = local_risk_map.join(coverage_final, how="left")
+        emd_final = emd_final.dropna(subset=["시설_천명당", "위험지수", "위도", "경도"])
 
         # (1) 현재 종합위험지수 / 경기도 평균 / 평택시 PM2.5
         col1, col2, col3 = st.columns(3)
@@ -972,64 +981,97 @@ def main():
 
         # (5) 결론 지도: 관리 집중 / 시설 증설 대상 구역
         st.markdown("#### (5) 결론 지도: 노인복지시설과 환경 리스크를 함께 본 우선·증설 대상 구역")
-        if has_coords and not base_geo.empty:
-            # 위험/청정 + 시설 밀집/취약 기준 (분위수 활용)
-            risk_high_thr = base_geo["위험지수"].quantile(0.75)
-            risk_low_thr = base_geo["위험지수"].quantile(0.25)
-            elder_high_thr = base_geo["노인복지시설_수"].quantile(0.75)
-            elder_low_thr = base_geo["노인복지시설_수"].quantile(0.50)
 
-            # 노인복지시설 밀집 + 위험 지역 → 보라색
-            focus_geo = base_geo[
-                (base_geo["위험지수"] >= risk_high_thr)
-                & (base_geo["노인복지시설_수"] >= elder_high_thr)
-            ].copy()
+        if not emd_final.empty:
+            # emd_final: 행정동 index + [노인복지시설_수, 유해화학사업장_수, 대기질위험지수, 위험지수, 위도, 경도, 시설_천명당]
+            emd_geo = (
+                emd_final
+                .reset_index()
+                .rename(columns={"행정동": "읍면동", "위도": "lat", "경도": "lon"})
+                .dropna(subset=["lat", "lon"])
+            )
 
-            # 노인복지시설 취약 + 청정 지역 → 청록색
-            expand_geo = base_geo[
-                (base_geo["위험지수"] <= risk_low_thr)
-                & (base_geo["노인복지시설_수"] <= elder_low_thr)
-            ].copy()
+            # 1) 기준선 계산
+            risk_low_thr  = emd_geo["위험지수"].median()        # ‘청정’ 기준 (위험 지수 낮은 쪽)
+            risk_high_thr = emd_geo["위험지수"].quantile(0.75)  # ‘고위험’ 기준
+            cov_low_thr   = emd_geo["시설_천명당"].quantile(0.25)  # 시설 부족 기준 (하위 25%)
+            cov_high_thr  = emd_geo["시설_천명당"].quantile(0.75)  # 시설 충분 기준 (상위 25%)
 
-            layers = []
+            # 1-1) 시설 증설 후보(파란 원)
+            #  - 조건: 위험지수 ≤ 중위수(상대적으로 청정) AND 시설_천명당 ≤ 하위 25% (시설 부족)
+            expand_candidates = (
+                emd_geo[
+                    (emd_geo["위험지수"] <= risk_low_thr)
+                    & (emd_geo["시설_천명당"] <= cov_low_thr)
+                ]
+                .sort_values("시설_천명당")      # 시설_천명당 낮은 순 → 1순위
+                .head(3)
+                .copy()
+            )
+            expand_candidates["expand_rank"] = np.arange(1, len(expand_candidates) + 1)
 
-            # 전체 읍·면·동을 옅은 회색 점으로 배경 표시
-            layers.append(
+            # 1-2) 관리 집중 후보(빨간 원)
+            #  - 조건: 위험지수 ≥ 상위 25% AND 시설_천명당 ≥ 상위 25% (시설은 많은데 환경이 나쁨)
+            focus_candidates = (
+                emd_geo[
+                    (emd_geo["위험지수"] >= risk_high_thr)
+                    & (emd_geo["시설_천명당"] >= cov_high_thr)
+                ]
+                .sort_values("위험지수", ascending=False)  # 위험지수 높은 순 → 1순위
+                .head(3)
+                .copy()
+            )
+            focus_candidates["focus_rank"] = np.arange(1, len(focus_candidates) + 1)
+
+            # 2) 원 크기 설정
+            #   - 파란 원: 증설 우선순위 1 → 가장 큰 원, 2·3위는 점점 작게
+            #   - 빨간 원: 관리 우선순위 1 → 가장 큰 원, 2·3위는 점점 작게
+            blue_radius = {1: 1300, 2: 1000, 3: 700}
+            red_radius  = {1: 1500, 2: 1150, 3: 800}
+
+            expand_candidates["marker_radius_blue"] = expand_candidates["expand_rank"].map(blue_radius)
+            focus_candidates["marker_radius_red"]   = focus_candidates["focus_rank"].map(red_radius)
+
+            # 3) 레이어 구성 (배경 + 파란 원 + 빨간 원)
+            layers = [
+                # 전체 읍·면·동 배경 (옅은 회색 점)
                 pdk.Layer(
                     "ScatterplotLayer",
-                    data=base_geo,
+                    data=emd_geo,
                     get_position="[lon, lat]",
                     get_radius=250,
                     get_fill_color="[120, 120, 120, 60]",
                     pickable=False,
                 )
-            )
+            ]
 
-            if not focus_geo.empty:
-                focus_layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=focus_geo,
-                    get_position="[lon, lat]",
-                    get_radius=900,
-                    get_fill_color="[160, 0, 200, 200]",  # 보라색
-                    pickable=True,
+            if not expand_candidates.empty:
+                layers.append(
+                    pdk.Layer(
+                        "ScatterplotLayer",
+                        data=expand_candidates,
+                        get_position="[lon, lat]",
+                        get_radius="marker_radius_blue",
+                        get_fill_color="[0, 153, 255, 220]",  # 파랑
+                        pickable=True,
+                    )
                 )
-                layers.append(focus_layer)
 
-            if not expand_geo.empty:
-                expand_layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    data=expand_geo,
-                    get_position="[lon, lat]",
-                    get_radius=900,
-                    get_fill_color="[0, 190, 190, 200]",  # 청록색
-                    pickable=True,
+            if not focus_candidates.empty:
+                layers.append(
+                    pdk.Layer(
+                        "ScatterplotLayer",
+                        data=focus_candidates,
+                        get_position="[lon, lat]",
+                        get_radius="marker_radius_red",
+                        get_fill_color="[255, 0, 0, 220]",  # 빨강
+                        pickable=True,
+                    )
                 )
-                layers.append(expand_layer)
 
-            summary_view = pdk.ViewState(
-                latitude=float(base_geo["lat"].mean()),
-                longitude=float(base_geo["lon"].mean()),
+            view_state = pdk.ViewState(
+                latitude=float(emd_geo["lat"].mean()),
+                longitude=float(emd_geo["lon"].mean()),
                 zoom=10.5,
                 pitch=0,
             )
@@ -1037,54 +1079,54 @@ def main():
             st.pydeck_chart(
                 pdk.Deck(
                     layers=layers,
-                    initial_view_state=summary_view,
+                    initial_view_state=view_state,
                     tooltip={
                         "text": "읍·면·동: {읍면동}\n"
-                                "노인복지시설 수: {노인복지시설_수}개\n"
-                                "유해화학사업장 수: {유해화학사업장_수}개\n"
-                                "위험지수: {위험지수}"
+                                "시설 수 (천 명당): {시설_천명당:.2f}\n"
+                                "위험지수: {위험지수:.2f}"
                     },
                 )
             )
 
-            # (6) 결론 텍스트: 표로 나타내기
+            # (6) 결론 요약 (표)
             st.markdown("#### (6) 결론 요약 (표)")
             col_left, col_right = st.columns(2)
 
-            focus_table = focus_geo[["읍면동", "노인복지시설_수", "유해화학사업장_수", "위험지수"]].rename(
-                columns={
-                    "읍면동": "위치",
-                    "노인복지시설_수": "현 노인복지시설 수",
-                    "유해화학사업장_수": "현 유해화학사업장 수",
-                    "위험지수": "위험지수 인덱스",
-                }
-            )
-
-            expand_table = expand_geo[["읍면동", "노인복지시설_수", "유해화학사업장_수", "위험지수"]].rename(
-                columns={
-                    "읍면동": "위치",
-                    "노인복지시설_수": "현 노인복지시설 수",
-                    "유해화학사업장_수": "현 유해화학사업장 수",
-                    "위험지수": "위험지수 인덱스",
-                }
-            )
-
             with col_left:
-                st.markdown("**관리 집중 대상 구역**")
-                if focus_table.empty:
+                st.markdown("**관리 집중 대상 구역 (복지시설 많고 대기질이 나쁜 곳)**")
+                if focus_candidates.empty:
                     st.write("선정된 관리 집중 대상 구역이 없습니다.")
                 else:
+                    focus_table = focus_candidates[
+                        ["읍면동", "시설_천명당", "위험지수"]
+                    ].rename(
+                        columns={
+                            "읍면동": "읍·면·동",
+                            "시설_천명당": "시설 수 (천 명당)",
+                            "위험지수": "환경 위험 지수",
+                        }
+                    )
                     st.dataframe(focus_table, use_container_width=True)
 
             with col_right:
-                st.markdown("**시설 증설 대상 구역**")
-                if expand_table.empty:
+                st.markdown("**시설 증설 대상 구역 (청정하지만 복지시설이 부족한 곳)**")
+                if expand_candidates.empty:
                     st.write("선정된 시설 증설 대상 구역이 없습니다.")
                 else:
+                    expand_table = expand_candidates[
+                        ["읍면동", "시설_천명당", "위험지수"]
+                    ].rename(
+                        columns={
+                            "읍면동": "읍·면·동",
+                            "시설_천명당": "시설 수 (천 명당)",
+                            "위험지수": "환경 위험 지수",
+                        }
+                    )
                     st.dataframe(expand_table, use_container_width=True)
+
         else:
             st.info(
-                "결론 지도를 그리기 위한 읍·면·동별 좌표 정보가 없어 우선/증설 대상 구역을 시각화할 수 없습니다."
+                "노인복지시설 충족도(시설_천명당)와 위험지수, 좌표가 모두 있는 읍·면·동이 없어 결론 지도를 그릴 수 없습니다."
             )
 
 
