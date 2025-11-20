@@ -56,6 +56,7 @@ LEGAL_EMD = [
 
 # 동 이름 매핑 (비전1·2동 → 비전동, 신장1·2동 → 신장동)
 # 동 이름 매핑 (비전1·2동 → 비전동, 신장1·2동 → 신장동)
+# 동 이름 매핑 (비전1·2동, 신장1·2동 외에 예전 동 이름까지 포함)
 EMD_ALIAS_MAP = {
     # 비전동 계열
     "비전동": "비전동",
@@ -69,21 +70,56 @@ EMD_ALIAS_MAP = {
     "신장 1동": "신장동",
     "신장2동": "신장동",
     "신장 2동": "신장동",
-}
-
-# 옛 법정동 → 현재 법정동 매핑 (도로명주소·행정구역 문자열 교정용)
-OLD_EMD_TO_NEW = {
+    # 예전 동 이름 → 현재 동 이름
     "이충동": "중앙동",
     "평택동": "원평동",
     "합정동": "신평동",
     "소사동": "비전동",
-    "독곡동": "송북동",   # 이미지의 '독곡동' 기준
     "유천동": "신평동",
     "가재동": "송탄동",
     "장당동": "중앙동",
     "칠괴동": "송탄동",
     "신대동": "원평동",
 }
+
+# 도로명주소 안의 예전 동 이름을 새 동 이름으로 치환 + 괄호 내용 제거
+OLD_DONG_IN_ADDR_MAP = {
+    "이충동": "중앙동",
+    "평택동": "원평동",
+    "합정동": "신평동",
+    "소사동": "비전동",
+    "유천동": "신평동",
+    "가재동": "송탄동",
+    "장당동": "중앙동",
+    "칠괴동": "송탄동",
+    "신대동": "원평동",
+}
+# extract_eupmyeondong()에서 사용할 옛 동이름 → 현재 동이름 매핑
+OLD_EMD_TO_NEW = OLD_DONG_IN_ADDR_MAP
+
+def normalize_address_for_geocode(addr: str) -> str:
+    """지오코딩을 위한 주소 정리 (옛 동 이름 → 현재 동 이름, 괄호 내용 제거 등)."""
+    if not addr or pd.isna(addr):
+        return ""
+
+    addr = str(addr)
+
+    # 1) 옛 동 이름이 주소 문자열에 직접 들어가 있으면 현재 동 이름으로 치환
+    for old, new in OLD_DONG_IN_ADDR_MAP.items():
+        if old in addr:
+            addr = addr.replace(old, new)
+
+    # 2) 괄호 안 내용(동 이름이나 건물명 등)은 지오코딩에 방해가 되므로 제거
+    addr = re.sub(r"\(.*?\)", "", addr)
+
+    # 3) 쉼표 뒤(층/호, 지층 등) 정보는 지오코딩에 거의 필요 없으므로 첫 번째 쉼표 앞까지만 사용
+    addr = addr.split(",", 1)[0]
+
+    # 4) 양쪽 공백 정리
+    addr = addr.strip()
+
+    return addr
+
 
 # 도로명주소 문자열 안에서도 같은 치환을 사용하기 위한 dict
 OLD_DONG_IN_ADDR = {
@@ -263,10 +299,12 @@ def _geocode_single(addr: str):
         if old in addr_norm:
             addr_norm = addr_norm.replace(old, new)
 
+    query = normalize_address_for_geocode(addr)
+
     # ----- 2) OSM Nominatim 호출 -----
     url = "https://nominatim.openstreetmap.org/search"
     params = {
-        "q": addr_norm,
+        "q": query,
         "format": "json",
         "limit": 1,
     }
@@ -352,8 +390,29 @@ def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
         if geo_col in df.columns:
             df[col] = df[col].where(~df[col].isna(), df[geo_col])
             df.drop(columns=[geo_col], inplace=True)
+    # 4) 아직도 좌표가 없는 행은 '행정동 중심점'으로 보정
+    if "행정동" in df.columns:
+        # 좌표가 있는 시설들만 이용해서 행정동별 평균 좌표 계산
+        emd_centers = (
+            df.dropna(subset=["위도", "경도"])
+              .groupby("행정동")[["위도", "경도"]]
+              .mean()
+        )
+
+        if not emd_centers.empty:
+            def fill_with_center(row):
+                if (pd.isna(row["위도"]) or pd.isna(row["경도"])):
+                    emd = row.get("행정동")
+                    if emd in emd_centers.index:
+                        center = emd_centers.loc[emd]
+                        row["위도"] = center["위도"]
+                        row["경도"] = center["경도"]
+                return row
+
+            df = df.apply(fill_with_center, axis=1)
 
     return df
+
 
 
 # ------------------------------------------------------------
@@ -387,6 +446,10 @@ def main():
     df_chem = data["chem"]
     df_pop = data["elderly_pop"]
     df_cai = data["cai"]
+
+    df_elderly_raw = df_elderly_raw.copy()
+    df_elderly_raw["행정동"] = df_elderly_raw["도로명주소"].apply(extract_eupmyeondong)
+
 
     # 노인복지시설: 도로명주소 지오코딩 적용
     df_elderly = ensure_elderly_geocoded(df_elderly_raw)
