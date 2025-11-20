@@ -87,7 +87,7 @@ def load_data():
     air = read_csv_safely(BASE_DIR / "경기도대기환경정보월평균자료.csv")
     grade = read_csv_safely(BASE_DIR / "경기도_대기환경정보항목별지수등급.csv")
     region = read_csv_safely(BASE_DIR / "경기도_대기환경_진단평가시스템_지역정보.csv")
-    elderly = read_csv_safely(BASE_DIR / "경기도_평택시_노인복지시설_20250129_(1).csv")
+    elderly = read_csv_safely(BASE_DIR / "경기도_평택시_노인복지시설_20250129_(1)_geocoded.csv")
     chem = read_csv_safely(BASE_DIR / "경기도_평택시_유해화학물질_취급사업장_현황_20250207.csv")
     cai = read_csv_safely(BASE_DIR / "pyeongtaek_CAI_index.csv")
     elderly_pop = read_csv_safely(
@@ -269,21 +269,29 @@ def geocode_elderly_addresses(addresses: tuple) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
 def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
     """
     노인복지시설 데이터에 대해 도로명주소 기준으로 지오코딩을 수행하여
     위도/경도 컬럼을 채워준다.
-    - 기존에 위도/경도가 일부 존재하면 그대로 두고, 부족한 행만 채운다.
+    - CSV에 lat/lon 컬럼이 이미 있다면 그것을 위도/경도로 사용하고,
+      부족한 행만 추가로 지오코딩한다.
     """
     df = df_elderly.copy()
 
-    # 위도/경도 컬럼이 없으면 생성
+    # 0) _geocoded.csv에 lat / lon 으로 저장된 경우를 먼저 처리
+    if "lat" in df.columns and "위도" not in df.columns:
+        df.rename(columns={"lat": "위도"}, inplace=True)
+    if "lon" in df.columns and "경도" not in df.columns:
+        df.rename(columns={"lon": "경도"}, inplace=True)
+
+    # 1) 위도/경도 컬럼이 없으면 생성
     if "위도" not in df.columns:
         df["위도"] = np.nan
     if "경도" not in df.columns:
         df["경도"] = np.nan
 
-    # 지오코딩이 필요한 행(위도 또는 경도가 비어 있는 경우)
+    # 2) 지오코딩이 필요한 행(위도 또는 경도가 비어 있는 경우)만 대상으로
     need_geo_mask = df["위도"].isna() | df["경도"].isna()
     addrs_to_geo = (
         df.loc[need_geo_mask, "도로명주소"]
@@ -291,8 +299,9 @@ def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
         .unique()
         .tolist()
     )
+
     if not addrs_to_geo:
-        # 채울 주소가 없으면 그대로 반환
+        # 이미 전부 채워져 있으면 그대로 반환
         return df
 
     addr_tuple = tuple(sorted(addrs_to_geo))
@@ -300,7 +309,7 @@ def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
     with st.spinner("노인복지시설 도로명주소를 지오코딩하는 중입니다. (한 번만 수행됩니다)"):
         geo_df = geocode_elderly_addresses(addr_tuple)
 
-    # 기존 df와 지오코딩 결과를 병합
+    # 3) 기존 df와 지오코딩 결과를 병합
     df = df.merge(geo_df, on="도로명주소", how="left", suffixes=("", "_geo"))
 
     # 기존 위도/경도가 비어 있는 경우에만 _geo 값으로 채우기
