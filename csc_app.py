@@ -18,6 +18,9 @@ st.set_page_config(
 # 사용자 PC/클라우드 기준 데이터 폴더
 BASE_DIR = (Path(__file__).parent / "data").resolve()
 
+# QR 코드 이미지 경로 (csc_app.py와 같은 폴더에 저장했다고 가정)
+QR_PATH = Path(__file__).parent / "평택 ESG streamlit QR.png"
+
 # 대기오염 항목별 컬럼명 매핑
 POLLUTANT_COLS = {
     "SO2": "이산화황측정값(ppm)",
@@ -52,6 +55,7 @@ LEGAL_EMD = [
 ]
 
 # 동 이름 매핑 (비전1·2동 → 비전동, 신장1·2동 → 신장동)
+# 동 이름 매핑 (비전1·2동 → 비전동, 신장1·2동 → 신장동)
 EMD_ALIAS_MAP = {
     # 비전동 계열
     "비전동": "비전동",
@@ -66,6 +70,21 @@ EMD_ALIAS_MAP = {
     "신장2동": "신장동",
     "신장 2동": "신장동",
 }
+
+# 옛 법정동 → 현재 법정동 매핑 (도로명주소·행정구역 문자열 교정용)
+OLD_EMD_TO_NEW = {
+    "이충동": "중앙동",
+    "평택동": "원평동",
+    "합정동": "신평동",
+    "소사동": "비전동",
+    "독곡동": "송북동",   # 이미지의 '독곡동' 기준
+    "유천동": "신평동",
+    "가재동": "송탄동",
+    "장당동": "중앙동",
+    "칠괴동": "송탄동",
+    "신대동": "원평동",
+}
+
 
 # ------------------------------------------------------------
 # 유틸 함수
@@ -169,7 +188,11 @@ def extract_eupmyeondong(addr: str) -> str:
     if pd.isna(addr):
         return np.nan
 
+    # 문자열로 변환 후, 옛 동 이름을 현재 명칭으로 교체
     text = str(addr)
+    for old, new in OLD_EMD_TO_NEW.items():
+        if old in text:
+            text = text.replace(old, new)
 
     # 0단계: 주소 전체에서 비전/신장 계열 먼저 처리
     #   예: "비전1동 123-4", "신장 2동 11-3" 등
@@ -178,7 +201,6 @@ def extract_eupmyeondong(addr: str) -> str:
             return canon
 
     # 1단계: 나머지는 기존 로직대로 토큰 단위 필터링
-    # 공백, 쉼표, 괄호 기준으로 토큰 분리
     tokens = re.split(r"[ ,()]", text)
 
     for tok in tokens:
@@ -232,9 +254,15 @@ def _geocode_single(addr: str):
     if not addr or pd.isna(addr):
         return None, None
 
+    # 지오코딩 요청용으로도 옛 동 이름을 현재 명칭으로 교체
+    query_addr = str(addr)
+    for old, new in OLD_EMD_TO_NEW.items():
+        if old in query_addr:
+            query_addr = query_addr.replace(old, new)
+
     url = "https://nominatim.openstreetmap.org/search"
     params = {
-        "q": addr,
+        "q": query_addr,   # ← 교정된 주소로 요청
         "format": "json",
         "limit": 1,
     }
@@ -252,6 +280,7 @@ def _geocode_single(addr: str):
         return float(data[0]["lat"]), float(data[0]["lon"])
     except Exception:
         return None, None
+
 
 
 @st.cache_data
@@ -1128,6 +1157,21 @@ def main():
             st.info(
                 "노인복지시설 충족도(시설_천명당)와 위험지수, 좌표가 모두 있는 읍·면·동이 없어 결론 지도를 그릴 수 없습니다."
             )
+        # (7) 대시보드 접속용 QR 코드
+        st.markdown("#### (7) 대시보드 접속용 QR 코드")
+
+        with st.expander("📱 모바일에서 대시보드 열기 (QR 코드 보기)", expanded=False):
+            if QR_PATH.exists():
+                st.image(
+                    str(QR_PATH),
+                    caption="CSC - 평택시 대기질 리스크 & 노인복지시설 분석 대시보드",
+                    use_container_width=False,
+                )
+            else:
+                st.info(
+                    "QR 코드 이미지를 찾을 수 없습니다. "
+                    "'평택 ESG streamlit QR.png' 파일이 csc_app.py와 같은 폴더에 있는지 확인해 주세요."
+                )
 
 
 if __name__ == "__main__":
