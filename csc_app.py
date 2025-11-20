@@ -85,7 +85,10 @@ OLD_EMD_TO_NEW = {
     "신대동": "원평동",
 }
 
-
+# 도로명주소 문자열 안에서도 같은 치환을 사용하기 위한 dict
+OLD_DONG_IN_ADDR = {
+    old: new for old, new in EMD_ALIAS_MAP.items() if old != new
+}
 # ------------------------------------------------------------
 # 유틸 함수
 # ------------------------------------------------------------
@@ -254,15 +257,16 @@ def _geocode_single(addr: str):
     if not addr or pd.isna(addr):
         return None, None
 
-    # 지오코딩 요청용으로도 옛 동 이름을 현재 명칭으로 교체
-    query_addr = str(addr)
-    for old, new in OLD_EMD_TO_NEW.items():
-        if old in query_addr:
-            query_addr = query_addr.replace(old, new)
+    # ----- 1) 옛 동 이름을 현재 동 이름으로 치환 -----
+    addr_norm = str(addr)
+    for old, new in OLD_DONG_IN_ADDR.items():
+        if old in addr_norm:
+            addr_norm = addr_norm.replace(old, new)
 
+    # ----- 2) OSM Nominatim 호출 -----
     url = "https://nominatim.openstreetmap.org/search"
     params = {
-        "q": query_addr,   # ← 교정된 주소로 요청
+        "q": addr_norm,
         "format": "json",
         "limit": 1,
     }
@@ -280,6 +284,7 @@ def _geocode_single(addr: str):
         return float(data[0]["lat"]), float(data[0]["lon"])
     except Exception:
         return None, None
+
 
 
 
@@ -356,11 +361,22 @@ def ensure_elderly_geocoded(df_elderly: pd.DataFrame) -> pd.DataFrame:
 # ------------------------------------------------------------
 def main():
     st.title("CSC 프로젝트 - 공공 ESG 관점 평택시 대기질 리스크 & 노인복지시설 분석")
+
+    # Streamlit 대시보드 QR 코드 (제목 아래, 데이터 출처 위)
+    qr_path = Path(__file__).parent / "평택 ESG streamlit QR.png"
+    if qr_path.exists():
+        st.image(
+            str(qr_path),
+            width=180,
+            caption="모바일에서 열어보기 (Streamlit 대시보드 QR)",
+        )
+
     st.caption(
         "데이터 출처: 공공데이터포털(data.go.kr) - "
         "경기도 대기환경정보, 평택시 노인복지시설, 유해화학물질 취급사업장, "
         "경기도 대기환경 진단평가시스템 지역정보, 주민등록인구(고령 인구현황)"
     )
+
 
     # 데이터 로드
     data = load_data()
@@ -1157,21 +1173,6 @@ def main():
             st.info(
                 "노인복지시설 충족도(시설_천명당)와 위험지수, 좌표가 모두 있는 읍·면·동이 없어 결론 지도를 그릴 수 없습니다."
             )
-        # (7) 대시보드 접속용 QR 코드
-        st.markdown("#### (7) 대시보드 접속용 QR 코드")
-
-        with st.expander("📱 모바일에서 대시보드 열기 (QR 코드 보기)", expanded=False):
-            if QR_PATH.exists():
-                st.image(
-                    str(QR_PATH),
-                    caption="CSC - 평택시 대기질 리스크 & 노인복지시설 분석 대시보드",
-                    use_container_width=False,
-                )
-            else:
-                st.info(
-                    "QR 코드 이미지를 찾을 수 없습니다. "
-                    "'평택 ESG streamlit QR.png' 파일이 csc_app.py와 같은 폴더에 있는지 확인해 주세요."
-                )
 
 
 if __name__ == "__main__":
